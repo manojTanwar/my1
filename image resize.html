@@ -1,0 +1,1787 @@
+<?php
+/**
+ * @author: Manoj Tanwar
+ * @date:  Fab 26, 2019
+ * @version: 1.0.0
+ */
+namespace App\Controller\Admin;
+
+use App\Controller\AppController;
+use Cake\Datasource\Exception\RecordNotFoundException;
+use Cake\Network\Exception\MethodNotAllowedException;
+use Cake\Network\Exception\NotFoundException;
+use Cake\Network\Exception\BadRequestException;
+use Cake\Filesystem\File;
+
+class ProductsController extends AppController
+{  
+	const CAT_MAXIMUM_LEVEL = 4;
+	const FILE_PATH = 'product'.DS;
+    public function initialize()
+    {
+        parent::initialize();
+        
+        if(!$this->userAuthorized())
+        {
+            $this->Flash->error(__('You are not authorized to access that location.'));
+            return $this->redirect(['controller' => 'Dashboards', 'action' => 'index']);
+        }
+    }
+    
+    protected function _index()
+    {
+        $paramarters = [
+            ['name', 'Products.name', 'LIKE', ''],
+            ['slug', 'Products.slug', 'LIKE', ''],
+			['product_code', 'Products.product_code', 'LIKE', ''],
+            ['category_id', 'Categories.id', 'EQUALS', ''],
+            ['status', 'Products.status', 'EQUALS', ''],
+            ['created_from', 'Products.created', 'greaterThanOrEqual', 'DATE'],
+            ['created_to', 'Products.created', 'lessThanOrEqual', 'DATE']
+        ];
+        
+        $filters = $this->Search->formFilters($this->modelClass.'.ADINDEX', $paramarters);
+        
+        $conditions = [
+            $filters,
+            'Products.is_deleted' => false,
+            'categories.is_deleted' => false,
+        ];
+        
+        $contain = [
+            'Categories' => [
+                'fields' => ['id', 'name']
+            ]
+        ];
+        
+        return [$conditions, $contain];
+    }
+    
+    public function index()
+    {   
+        $this->set('page_title', __('List Products'));
+        
+        list($conditions, $contain) = $this->_index();
+        $this->paginate = [
+            'fields' => ['id', 'name', 'slug', 'product_code', 'image', 'price_from', 'category_id', 'weight', 'qty', 'status', 'created','category_id','sequence'],
+            'contain' => $contain,
+            'conditions' => $conditions,
+            'order' => ['Products.created' => 'DESC'],
+            'sortWhitelist' => ['Products.id', 'Products.name', 'Products.created']
+        ];
+        
+        try
+        {
+            $products = $this->paginate($this->Products);
+			
+        }
+        catch(NotFoundException $e)
+        {
+            $totalRecord = $this->Products->find()
+                ->contain($contain)
+                ->where($conditions)
+                ->count();
+            
+            $pageCount = ceil(($totalRecord?$totalRecord:1)/$this->request->getParam('paging.'.$this->modelClass.'.perPage'));
+            if($pageCount > 1)
+            {
+                return $this->redirect(['action' => 'index', 'page' => $pageCount]);
+            }
+            return $this->redirect(['action' => 'index']);
+        }
+        
+        $categories = $this->Products->Categories->find('list')
+            ->where(['Categories.status' => true, 'Categories.is_deleted' => false])
+            ->order(['Categories.name' => 'ASC']);
+        $imageRoot = static::IMAGE_ROOT;
+        $this->set(compact('products', 'categories','imageRoot'));
+        $this->set('activeMenu', 'Admin.Products.index');
+        
+        if($this->request->is('ajax'))
+        {
+            $this->viewBuilder()
+                ->setLayout('ajax')
+                ->setTemplatePath('Element'.DS.'Admin'.DS.'Products');
+        }
+    }
+    
+    public function add()
+    {
+        $this->set('page_title', __('Add New Product'));
+        
+        $product = $this->Products->newEntity();
+        if($this->request->is('post'))
+        {  
+	        $key_word="";
+			$product2 = $this->request->withData('is_deleted', 0);
+			$keywords = $this->request->data('meta_keywords');
+			$related_product = $this->request->data('related_product');
+			
+			if(!empty($keywords))
+			{
+				foreach($keywords as $keyword)
+				{
+					$key_word .=$keyword.', ';
+				}
+			}
+            $product = $this->Products->patchEntity($product, $product2->getData());
+			$product->meta_keywords = trim($key_word,','); 
+			if(!empty($this->request->data('product_galleries'))){
+			$gallery_imgs = $this->request->data('product_galleries'); } 
+			if($product->product_sizes[0]['size_detail']=='' && $product->product_sizes[0]['pro_price']=='')
+			{
+				unset($product->product_sizes);
+			}
+			
+			if(!$product->errors())
+            {  
+				$errors = [];
+				
+				
+				if($this->request->getData('image.tmp_name'))
+				{
+					$fileName1 = strtolower(pathinfo($this->request->getData('image.name'), PATHINFO_FILENAME));  
+					$fileName = $product->product_code.'_'.$fileName1;  
+					$fileExtension = strtolower(pathinfo($this->request->getData('image.name'), PATHINFO_EXTENSION)); 
+					$product->image = static::FILE_PATH.$fileName.'.'.$fileExtension;
+					$file = new File(static::IMAGE_ROOT.$product->image);
+					
+					$directory = $file->folder();
+					$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+					
+					$i = 1;
+					while($file->exists())
+					{
+						$product->image = static::FILE_PATH.$fileName.' ('.$i++.').'.$fileExtension;
+						$file = new File(static::IMAGE_ROOT.$product->image);
+					}
+					
+					$success = move_uploaded_file($this->request->getData('image.tmp_name'), static::IMAGE_ROOT.$product->image);
+					/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$product->image);
+				    $newFile = static::IMAGE_ROOT.DS.$product->image;
+					$w = 800;
+					$h = 800;
+					$img = "";
+					$ext = $fileExtension;
+					if($ext == "gif" || $ext == "GIF"){
+						$img = imagecreatefromgif(static::IMAGE_ROOT.$product->image);
+					}else if($ext == "png" || $ext == "PNG"){
+						$img = imagecreatefrompng(static::IMAGE_ROOT.$product->image);
+					}else{
+						$img = imagecreatefromjpeg(static::IMAGE_ROOT.$product->image);
+					} 
+					$tci = imagecreatetruecolor($w, $h);
+					imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+					imagejpeg($tci, $newFile, 80); */
+					if(!$success)
+					{
+						$errors[] = __('Unable to upload product photo. Please try again.');
+					}
+				}
+				if(!empty($gallery_imgs))
+				{  
+					foreach($gallery_imgs as $key => $gallery_img)
+					{  
+						if($gallery_img['product_image']['tmp_name'])
+						{   
+							$fileName2 = strtolower(pathinfo($gallery_img['product_image']['name'], PATHINFO_FILENAME)); 
+							$fileName2 = $product->product_code.'_'.$fileName2;  
+							$fileExtension = strtolower(pathinfo($gallery_img['product_image']['name'], PATHINFO_EXTENSION));  
+							$product->product_galleries[@$key]->product_image = static::FILE_PATH.$fileName2.'.'.$fileExtension;  
+							$file = new File(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							
+							$directory = $file->folder();
+							$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+							
+							$i = 1;
+							while($file->exists())
+							{
+								$product->product_galleries[@$key]->product_image = static::FILE_PATH.$fileName2.' ('.$i++.').'.$fileExtension;
+								$file = new File(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							}
+							
+							$success = move_uploaded_file($gallery_img['product_image']['tmp_name'], static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							
+							/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							$newFile = static::IMAGE_ROOT.DS.$product->product_galleries[@$key]->product_image;
+							$w = 800;
+							$h = 800;
+							$img = "";
+							$ext = $fileExtension;
+							if($ext == "gif" || $ext == "GIF"){
+								$img = imagecreatefromgif(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							}else if($ext == "png" || $ext == "PNG"){
+								$img = imagecreatefrompng(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							}else{
+								$img = imagecreatefromjpeg(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							} 
+							$tci = imagecreatetruecolor($w, $h);
+							imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+							imagejpeg($tci, $newFile, 80); */
+							$square=800;
+
+							// Load up the original image
+							$src  = imagecreatefromjpeg($gallery_img['product_image']['tmp_name']);
+							$w = imagesx($src); // image width
+							$h = imagesy($src); // image height
+							//printf("Orig: %dx%d\n",$w,$h);
+
+							// Create output canvas and fill with white
+							$final = imagecreatetruecolor($square,$square);
+							$bg_color = imagecolorallocate ($final, 255, 255, 255);
+
+							imagefill($final, 0, 0, $bg_color);
+
+							// Check if portrait or landscape
+							if($h>=$w){
+							// Portrait, i.e. tall image
+							$newh=$square;
+							$neww=intval($square*$w/$h);
+							//printf("New: %dx%d\n",$neww,$newh);
+							// Resize and composite original image onto output canvas
+							imagecopyresampled(
+							$final, $src, 
+							intval(($square-$neww)/2),0,
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							} else {
+							// Landscape, i.e. wide image
+							$neww=$square;
+							$newh=intval($square*$h/$w);
+							//printf("New: %dx%d\n",$neww,$newh);
+							imagecopyresampled(
+							$final, $src, 
+							0,intval(($square-$newh)/2),
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							}
+
+							// Write result 
+							imagejpeg($final,static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							if(!$success)
+							{
+								$errors[] = __('Unable to upload product photo. Please try again.');
+							} 
+						}
+					}
+				} 
+				
+				if(empty($errors))
+				{  
+					if($product = $this->Products->save($product))
+					{   
+				        
+				        if(count($related_product)>0)
+						{
+							if($related_product!='--select--'){
+							foreach($related_product as $related_product1)
+							{
+								$relatedProduct = $this->Products->RelatedProducts->newEntity();
+								$relatedProduct->product_id = $product->id;
+								$relatedProduct->rel_pro_id = $related_product1;
+								$relatedProduct->type = 'related';
+								$relatedProduct->is_deleted = 0;
+								$this->Products->RelatedProducts->save($relatedProduct);
+							}
+							}
+						}
+						if($product->images)
+						{    $data=[]; $errors1=[];
+							foreach($product->images as $key11 => $gallery_img)
+							{  
+							    $img_name='';
+								if($gallery_img['tmp_name'])
+								{   
+									$fileName3 = strtolower(pathinfo($gallery_img['name'], PATHINFO_FILENAME)); 
+									$fileName3 = $product->product_code.'_'.$fileName3;  
+									$fileExtension = strtolower(pathinfo($gallery_img['name'], PATHINFO_EXTENSION));  
+									$img_name = static::FILE_PATH.$fileName3.'.'.$fileExtension;  
+									$file = new File(static::IMAGE_ROOT.$img_name);
+									
+									$directory = $file->folder();
+									$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+									
+									$i = 1;
+									while($file->exists())
+									{
+										$img_name = static::FILE_PATH.$fileName3.' ('.$i++.').'.$fileExtension;
+										$file = new File(static::IMAGE_ROOT.$img_name);
+									}
+									
+									$success = move_uploaded_file($gallery_img['tmp_name'], static::IMAGE_ROOT.$img_name);
+									
+									$square=800;
+
+							// Load up the original image
+							$src  = imagecreatefromjpeg($gallery_img['tmp_name']);
+							$w = imagesx($src); // image width
+							$h = imagesy($src); // image height
+							//printf("Orig: %dx%d\n",$w,$h);
+
+							// Create output canvas and fill with white
+							$final = imagecreatetruecolor($square,$square);
+							$bg_color = imagecolorallocate ($final, 255, 255, 255);
+
+							imagefill($final, 0, 0, $bg_color);
+
+							// Check if portrait or landscape
+							if($h>=$w){
+							// Portrait, i.e. tall image
+							$newh=$square;
+							$neww=intval($square*$w/$h);
+							printf("New: %dx%d\n",$neww,$newh);
+							// Resize and composite original image onto output canvas
+							imagecopyresampled(
+							$final, $src, 
+							intval(($square-$neww)/2),0,
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							} else {
+							// Landscape, i.e. wide image
+							$neww=$square;
+							$newh=intval($square*$h/$w);
+							//printf("New: %dx%d\n",$neww,$newh);
+							imagecopyresampled(
+							$final, $src, 
+							0,intval(($square-$newh)/2),
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							}
+
+							// Write result 
+							imagejpeg($final,static::IMAGE_ROOT.$img_name);
+									/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$img_name);
+									$newFile = static::IMAGE_ROOT.DS.$img_name;
+									$w = 800;
+									$h = 800;
+									$img = "";
+									$ext = $fileExtension;
+									if($ext == "gif" || $ext == "GIF"){
+										$img = imagecreatefromgif(static::IMAGE_ROOT.$img_name);
+									}else if($ext == "png" || $ext == "PNG"){
+										$img = imagecreatefrompng(static::IMAGE_ROOT.$img_name);
+									}else{
+										$img = imagecreatefromjpeg(static::IMAGE_ROOT.$img_name);
+									} 
+									$tci = imagecreatetruecolor($w, $h);
+									imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+									imagejpeg($tci, $newFile, 80); */
+									if(!$success)
+									{
+										$errors1[] = __('Unable to upload product photo. Please try again.');
+									} 
+								}
+								$data[] = [
+									'title' => $product->image_name,
+									'product_image' => $img_name,
+									'product_id' => $product->id,
+									'status' => $product->image_status,
+									'is_deleted' => 0,
+									'type' => $product->image_types,
+								];
+							}
+							
+							if(empty($errors1))
+							{ 
+								$gallery = $this->Products->ProductGalleries->newEntity();
+								$gallery = $this->Products->ProductGalleries->patchEntities($gallery,$data);
+								
+								$this->Products->ProductGalleries->saveMany($gallery);
+							}else{
+								$this->Flash->error(implode('<br />', $errors1), ['escape' => false]);
+							}
+						}
+						if($product->product_galleries1)
+						{    
+							$datas=[]; $errors2=[];
+							foreach($product->product_galleries1 as $k => $product_gallery)
+							{ 
+							    $img_name2='';
+								if($product_gallery['product_image']['tmp_name'])
+								{
+									$fileName4 = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_FILENAME)); 
+									$fileName4 = $product->product_code.'_'.$fileName4;  
+									$fileExtension = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_EXTENSION));  
+									$img_name2 = static::FILE_PATH.$fileName4.'.'.$fileExtension;  
+									$file = new File(static::IMAGE_ROOT.$img_name2);
+									
+									$directory = $file->folder();
+									$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+									
+									$i = 1;
+									while($file->exists())
+									{
+										$img_name2 = static::FILE_PATH.$fileName4.' ('.$i++.').'.$fileExtension;
+										$file = new File(static::IMAGE_ROOT.$img_name2);
+									}
+									
+									$success = move_uploaded_file($product_gallery['product_image']['tmp_name'], static::IMAGE_ROOT.$img_name2);
+									
+									/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$img_name2);
+									$newFile = static::IMAGE_ROOT.DS.$img_name2;
+									$w = 800;
+									$h = 800;
+									$img = "";
+									$ext = $fileExtension;
+									if($ext == "gif" || $ext == "GIF"){
+										$img = imagecreatefromgif(static::IMAGE_ROOT.$img_name2);
+									}else if($ext == "png" || $ext == "PNG"){
+										$img = imagecreatefrompng(static::IMAGE_ROOT.$img_name2);
+									}else{
+										$img = imagecreatefromjpeg(static::IMAGE_ROOT.$img_name2);
+									} 
+									$tci = imagecreatetruecolor($w, $h);
+									imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+									imagejpeg($tci, $newFile, 80); */
+									if(!$success)
+									{
+										$errors2[] = __('Unable to upload product photo. Please try again.');
+									} 
+								}
+								$datas[] = [
+									'title' => $product_gallery['title'],
+									'product_image' => $img_name2,
+									'product_id' => $product->id,
+									'status' => $product_gallery['status'],
+									'is_deleted' => 0,
+									'type' => $product_gallery['type'],
+								];
+							}
+							if(empty($errors2))
+							{ 
+								$gallery = $this->Products->ProductGalleries->newEntity();
+								$gallery = $this->Products->ProductGalleries->patchEntities($gallery,$datas);
+								
+								$this->Products->ProductGalleries->saveMany($gallery);
+							}else{
+								$this->Flash->error(implode('<br />', $errors2), ['escape' => false]);
+							}
+						}
+						if($product->product_galleries2)
+						{    
+							$datas=[]; $errors3=[];
+							foreach($product->product_galleries2 as $k => $product_gallery)
+							{ 
+							    $img_name3='';
+								if($product_gallery['product_image']['tmp_name'])
+								{
+									$fileName5 = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_FILENAME)); 
+									$fileName5 = $product->product_code.'_'.$fileName5;  
+									$fileExtension = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_EXTENSION));  
+									$img_name3 = static::FILE_PATH.$fileName5.'.'.$fileExtension;  
+									$file = new File(static::IMAGE_ROOT.$img_name3);
+									
+									$directory = $file->folder();
+									$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+									
+									$i = 1;
+									while($file->exists())
+									{
+										$img_name3 = static::FILE_PATH.$fileName5.' ('.$i++.').'.$fileExtension;
+										$file = new File(static::IMAGE_ROOT.$img_name3);
+									}
+									
+									$success = move_uploaded_file($product_gallery['product_image']['tmp_name'], static::IMAGE_ROOT.$img_name3);
+									
+									/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$img_name3);
+									$newFile = static::IMAGE_ROOT.DS.$img_name3;
+									$w = 800;
+									$h = 800;
+									$img = "";
+									$ext = $fileExtension;
+									if($ext == "gif" || $ext == "GIF"){
+										$img = imagecreatefromgif(static::IMAGE_ROOT.$img_name3);
+									}else if($ext == "png" || $ext == "PNG"){
+										$img = imagecreatefrompng(static::IMAGE_ROOT.$img_name3);
+									}else{
+										$img = imagecreatefromjpeg(static::IMAGE_ROOT.$img_name3);
+									} 
+									$tci = imagecreatetruecolor($w, $h);
+									imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+									imagejpeg($tci, $newFile, 80); */
+									if(!$success)
+									{
+										$errors3[] = __('Unable to upload product photo. Please try again.');
+									} 
+								}
+								$datas[] = [
+									'title' => $product_gallery['title'],
+									'product_image' => $img_name3,
+									'product_id' => $product->id,
+									'status' => $product_gallery['status'],
+									'is_deleted' => 0,
+									'type' => $product_gallery['type'],
+								];
+							}
+							if(empty($errors3))
+							{ 
+								$gallery = $this->Products->ProductGalleries->newEntity();
+								$gallery = $this->Products->ProductGalleries->patchEntities($gallery,$datas);
+								
+								$this->Products->ProductGalleries->saveMany($gallery);
+							}else{
+								$this->Flash->error(implode('<br />', $errors3), ['escape' => false]);
+							}
+						}
+						/* $this->Products->ProductCategories->deleteAll(['product_id'=>$product->id]);
+						$category_ids = $this->request->data('category_id');
+						if(!empty($category_ids))
+						{
+							foreach($category_ids as $category_id)
+							{
+								$productCategorie = $this->Products->ProductCategories->newEntity();
+								$productCategorie->product_id  = $product->id;
+								$productCategorie->category_id = $category_id;
+								$this->Products->ProductCategories->save($productCategorie);
+							}
+						} */
+						$this->Flash->success(__('The product has been added successfully.'));
+						return $this->redirect(['action' => 'index']);
+					}
+					else{ 
+						 $this->Flash->error(__('The product could not be added. Please see warning(s) below.'));
+					}
+				}
+				else
+				{ 
+					$this->Flash->error(implode('<br />', $errors), ['escape' => false]);
+				}
+			}
+            else
+            {   
+                $this->Flash->error(__('The product could not be added. Please see warning(s) below.'));
+            }
+        }
+        $labels = ['Material','Color','Type','Logo','MOQ','Samples Time','OEM','Packing Details','Production Capacity','Payment Term','Port of loading','Payment Flow','Delivery time','Paper','Leather','Size'];
+        $categories = $this->Products->Categories->find('treeList')
+            ->select(['id', 'name', 'parent_id', 'status'])
+            ->where(['Categories.is_deleted' => false])
+            ->andWhere(['Categories.level <' => static::CAT_MAXIMUM_LEVEL]);
+			
+        $categoryList = $this->Products->Categories->find('treeList')
+            ->where(['Categories.is_deleted' => false,'Categories.status' => true])
+            ->andWhere(['Categories.level <' => static::CAT_MAXIMUM_LEVEL]); 
+        $this->set(compact('product', 'categories', 'categoryList', 'labels'));
+        $this->set('activeMenu', 'Admin.Products.index');
+    }
+    
+    public function edit($id = null)
+    {   
+        $this->set('page_title', __('Edit Product'));
+       
+        try
+        {
+            $product = $this->Products->get($id, [
+                'contain' => [
+                    'ProductCategories' => [
+                        'fields' => ['id', 'product_id', 'category_id']
+                    ],
+					'ProductGalleries'=> [
+                        'fields' => ['id', 'title', 'product_image','product_id','sequence','type']
+                    ],
+					'ProductSizes'=> [
+                        'fields' => ['id', 'product_id', 'size_detail','weight','sequence', 'pro_price', 'status','pro_qty','parameter']
+					],
+					'RelatedProducts'=>[
+					'fields' => ['id','product_id','rel_pro_id']
+					],
+					'ProductColors'=>[
+					'fields' => ['id','product_id','name','sequence','status']
+					],
+					'ProductLebelContents'=>[
+					'fields' => ['id','product_id','name','desceiption','sequence'],
+					'sort'=>['ProductLebelContents.sequence'=>'ASC']
+					]
+                ],
+                'conditions' => [
+                    'Products.is_deleted' => false,
+                ]
+            ]);
+            
+            $productDb = clone $product;
+			$categoryArr=[];
+			foreach($productDb->product_categories as $product_categorie)
+			{
+				
+				$categoryArr[] =$product_categorie->category_id;
+			}
+        }
+        catch(RecordNotFoundException $e)
+        {
+            $this->Flash->error(__('Invalid product selection.'));
+            return $this->redirect($this->_redirectUrl());
+        }
+        
+        if($this->request->is(['patch', 'post', 'put']))
+        {   
+			$related_product = $this->request->data('related_product');
+			$product_sizes = $this->request->data('product_sizes');
+			$product_lebel_content = $this->request->data('product_lebel_contents');
+			$key_word ='';
+            $product2 = $this->request
+                ->withData('is_deleted', $product->is_deleted);
+            $keywords = $this->request->data('meta_keywords'); 
+            if(!empty($keywords))
+			{
+				foreach($keywords as $keyword)
+				{
+					$key_word .=$keyword.', ';
+				}
+				 
+			}
+			else{
+				$product->meta_keywords = ''; 
+			}  
+			if($product_lebel_content=='')
+			{
+				$this->Products->ProductLebelContents->deleteAll(['product_id'=>$product->id]);
+			}
+			if($product_sizes=='')
+			{
+				$this->Products->ProductSizes->deleteAll(['product_id'=>$product->id]);
+			}
+            $product = $this->Products->patchEntity($product, $product2->getData()); 
+			$product->meta_keywords = rtrim($key_word,', ');
+			$product->image = @$productDb->image;
+			if(!empty($this->request->data('product_galleries'))){
+			$gallery_imgs = $this->request->data('product_galleries');	
+				foreach($gallery_imgs as $key => $gallery_img)
+				{  
+					if(empty($gallery_img['product_image']['tmp_name']))
+					{  
+						$product->product_galleries[@$key]->product_image = $gallery_img['h_product_image'];
+					}
+				}
+			} 
+			 
+			if(!$product->errors())
+            { 
+				$errors = [];
+				if($this->request->getData('image.tmp_name'))
+				{
+					$fileName1 = strtolower(pathinfo($this->request->getData('image.name'), PATHINFO_FILENAME));  
+					$fileName = $product->product_code.'_'.$fileName1;  
+					$fileExtension = strtolower(pathinfo($this->request->getData('image.name'), PATHINFO_EXTENSION)); 
+					$product->image = static::FILE_PATH.$fileName.'.'.$fileExtension;
+					$file = new File(static::IMAGE_ROOT.$product->image);
+					
+					$directory = $file->folder();
+					$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+					
+					$i = 1;
+					while($file->exists())
+					{
+						$product->image = static::FILE_PATH.$fileName.' ('.$i++.').'.$fileExtension;
+						$file = new File(static::IMAGE_ROOT.$product->image);
+					}
+					
+					$success = move_uploaded_file($this->request->getData('image.tmp_name'), static::IMAGE_ROOT.$product->image);
+					/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$product->image);
+				    $newFile = static::IMAGE_ROOT.DS.$product->image;
+					$w = 800;
+					$h = 800;
+					$img = "";
+					$ext = $fileExtension;
+					if($ext == "gif" || $ext == "GIF"){
+						$img = imagecreatefromgif(static::IMAGE_ROOT.$product->image);
+					}else if($ext == "png" || $ext == "PNG"){
+						$img = imagecreatefrompng(static::IMAGE_ROOT.$product->image);
+					}else{
+						$img = imagecreatefromjpeg(static::IMAGE_ROOT.$product->image);
+					} 
+					$tci = imagecreatetruecolor($w, $h);
+					imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+					imagejpeg($tci, $newFile, 80); */
+					if(!$success)
+					{
+						$errors[] = __('Unable to upload product photo. Please try again.');
+					}
+				}
+				if(!empty($gallery_imgs))
+				{  
+					foreach($gallery_imgs as $key => $gallery_img)
+					{  
+						if($gallery_img['product_image']['tmp_name'])
+						{   
+							$fileName2 = strtolower(pathinfo($gallery_img['product_image']['name'], PATHINFO_FILENAME));
+							$fileName = $product->product_code.'_'.$fileName2;  							
+							$fileExtension = strtolower(pathinfo($gallery_img['product_image']['name'], PATHINFO_EXTENSION));  
+							$product->product_galleries[@$key]->product_image = static::FILE_PATH.$fileName.'.'.$fileExtension;  
+							$file = new File(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							
+							$directory = $file->folder();
+							$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+							
+							$i = 1;
+							while($file->exists())
+							{
+								$product->product_galleries[@$key]->product_image = static::FILE_PATH.$fileName.' ('.$i++.').'.$fileExtension;
+								$file = new File(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							}
+							
+							$success = move_uploaded_file($gallery_img['product_image']['tmp_name'], static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							
+							$square=800;
+
+							// Load up the original image
+							$src  = imagecreatefromjpeg($gallery_img['product_image']['tmp_name']);
+							$w = imagesx($src); // image width
+							$h = imagesy($src); // image height
+							//printf("Orig: %dx%d\n",$w,$h);
+
+							// Create output canvas and fill with white
+							$final = imagecreatetruecolor($square,$square);
+							$bg_color = imagecolorallocate ($final, 255, 255, 255);
+
+							imagefill($final, 0, 0, $bg_color);
+
+							// Check if portrait or landscape
+							if($h>=$w){
+							// Portrait, i.e. tall image
+							$newh=$square;
+							$neww=intval($square*$w/$h);
+							//printf("New: %dx%d\n",$neww,$newh);
+							// Resize and composite original image onto output canvas
+							imagecopyresampled(
+							$final, $src, 
+							intval(($square-$neww)/2),0,
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							} else {
+							// Landscape, i.e. wide image
+							$neww=$square;
+							$newh=intval($square*$h/$w);
+							//printf("New: %dx%d\n",$neww,$newh);
+							imagecopyresampled(
+							$final, $src, 
+							0,intval(($square-$newh)/2),
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							}
+
+							// Write result 
+							imagejpeg($final,static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							$newFile = static::IMAGE_ROOT.DS.$product->product_galleries[@$key]->product_image;
+							$w = 800;
+							$h = 800;
+							$img = "";
+							$ext = $fileExtension;
+							if($ext == "gif" || $ext == "GIF"){
+								$img = imagecreatefromgif(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							}else if($ext == "png" || $ext == "PNG"){
+								$img = imagecreatefrompng(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							}else{
+								$img = imagecreatefromjpeg(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							} 
+							$tci = imagecreatetruecolor($w, $h);
+							imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+							imagejpeg($tci, $newFile, 80); */
+							
+							if(!$success)
+							{
+								$errors[] = __('Unable to upload product photo. Please try again.');
+							} 
+						}
+						
+					}
+				}else{ 
+					$this->Products->ProductGalleries->deleteAll(['ProductGalleries.product_id'=>$product->id,'ProductGalleries.type'=>'other']);
+				}
+				
+				
+				if(empty($errors))
+				{   
+			       
+					if($product = $this->Products->save($product))
+					{    
+						if($product->images)
+						{    $data=[]; $errors1=[];
+							foreach($product->images as $key11 => $gallery_img)
+							{  
+							    $img_name='';
+								if($gallery_img['tmp_name'])
+								{   
+									$fileName3 = strtolower(pathinfo($gallery_img['name'], PATHINFO_FILENAME)); 
+									$fileName = $product->product_code.'_'.$fileName3;
+									$fileExtension = strtolower(pathinfo($gallery_img['name'], PATHINFO_EXTENSION));  
+									$img_name = static::FILE_PATH.$fileName.'.'.$fileExtension;  
+									$file = new File(static::IMAGE_ROOT.$img_name);
+									
+									$directory = $file->folder();
+									$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+									
+									$i = 1;
+									while($file->exists())
+									{
+										$img_name = static::FILE_PATH.$fileName.' ('.$i++.').'.$fileExtension;
+										$file = new File(static::IMAGE_ROOT.$img_name);
+									}
+									
+									$success = move_uploaded_file($gallery_img['tmp_name'], static::IMAGE_ROOT.$img_name);
+									$square=800;
+
+							// Load up the original image
+							$src  = imagecreatefromjpeg($gallery_img['tmp_name']);
+							$w = imagesx($src); // image width
+							$h = imagesy($src); // image height
+							//printf("Orig: %dx%d\n",$w,$h);
+
+							// Create output canvas and fill with white
+							$final = imagecreatetruecolor($square,$square);
+							$bg_color = imagecolorallocate ($final, 255, 255, 255);
+
+							imagefill($final, 0, 0, $bg_color);
+
+							// Check if portrait or landscape
+							if($h>=$w){
+							// Portrait, i.e. tall image
+							$newh=$square;
+							$neww=intval($square*$w/$h);
+							printf("New: %dx%d\n",$neww,$newh);
+							// Resize and composite original image onto output canvas
+							imagecopyresampled(
+							$final, $src, 
+							intval(($square-$neww)/2),0,
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							} else {
+							// Landscape, i.e. wide image
+							$neww=$square;
+							$newh=intval($square*$h/$w);
+							//printf("New: %dx%d\n",$neww,$newh);
+							imagecopyresampled(
+							$final, $src, 
+							0,intval(($square-$newh)/2),
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							}
+
+							// Write result 
+							imagejpeg($final,static::IMAGE_ROOT.$img_name);
+									/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$img_name);
+									$newFile = static::IMAGE_ROOT.DS.$img_name;
+									$w = 800;
+									$h = 800;
+									$img = "";
+									$ext = $fileExtension;
+									if($ext == "gif" || $ext == "GIF"){
+										$img = imagecreatefromgif(static::IMAGE_ROOT.$img_name);
+									}else if($ext == "png" || $ext == "PNG"){
+										$img = imagecreatefrompng(static::IMAGE_ROOT.$img_name);
+									}else{
+										$img = imagecreatefromjpeg(static::IMAGE_ROOT.$img_name);
+									} 
+									$tci = imagecreatetruecolor($w, $h);
+									imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+									imagejpeg($tci, $newFile, 80); */
+									if(!$success)
+									{
+										$errors1[] = __('Unable to upload product photo. Please try again.');
+									} 
+								}
+								$data[] = [
+									'title' => $product->image_name,
+									'product_image' => $img_name,
+									'product_id' => $product->id,
+									'status' => $product->image_status,
+									'is_deleted' => 0,
+									'type' => $product->image_types,
+								];
+							}
+							
+							if(empty($errors1))
+							{ 
+								$gallery = $this->Products->ProductGalleries->newEntity();
+								$gallery = $this->Products->ProductGalleries->patchEntities($gallery,$data);
+								
+								$this->Products->ProductGalleries->saveMany($gallery);
+							}else{
+								$this->Flash->error(implode('<br />', $errors1), ['escape' => false]);
+							}
+						}
+						$this->Products->ProductGalleries->deleteAll(['ProductGalleries.product_id'=>$product->id,'ProductGalleries.type'=>'related']);
+						if($product->product_galleries1)
+						{    
+							$datas=[]; $errors2=[];
+							foreach($product->product_galleries1 as $k => $product_gallery)
+							{ 
+							    $img_name2='';
+								if($product_gallery['product_image']['tmp_name'])
+								{
+									$fileName4 = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_FILENAME)); 
+									$fileName4 = $product->product_code.'_'.$fileName4;  
+									$fileExtension = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_EXTENSION));  
+									$img_name2 = static::FILE_PATH.$fileName4.'.'.$fileExtension;  
+									$file = new File(static::IMAGE_ROOT.$img_name2);
+									
+									$directory = $file->folder();
+									$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+									
+									$i = 1;
+									while($file->exists())
+									{
+										$img_name2 = static::FILE_PATH.$fileName4.' ('.$i++.').'.$fileExtension;
+										$file = new File(static::IMAGE_ROOT.$img_name2);
+									}
+									
+									$success = move_uploaded_file($product_gallery['product_image']['tmp_name'], static::IMAGE_ROOT.$img_name2);
+									/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$img_name2);
+									$newFile = static::IMAGE_ROOT.DS.$img_name2;
+									$w = 800;
+									$h = 800;
+									$img = "";
+									$ext = $fileExtension;
+									if($ext == "gif" || $ext == "GIF"){
+										$img = imagecreatefromgif(static::IMAGE_ROOT.$img_name2);
+									}else if($ext == "png" || $ext == "PNG"){
+										$img = imagecreatefrompng(static::IMAGE_ROOT.$img_name2);
+									}else{
+										$img = imagecreatefromjpeg(static::IMAGE_ROOT.$img_name2);
+									} 
+									$tci = imagecreatetruecolor($w, $h);
+									imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+									imagejpeg($tci, $newFile, 80); */
+									if(!$success)
+									{
+										$errors2[] = __('Unable to upload product photo. Please try again.');
+									} 
+								}else{
+									$img_name2=$product_gallery['h_product_image'];
+								}
+								$datas[] = [
+									'title' => $product_gallery['title'],
+									'product_image' => $img_name2,
+									'product_id' => $product->id,
+									'status' => $product_gallery['status'],
+									'is_deleted' => 0,
+									'type' => $product_gallery['type'],
+								];
+							} 
+							if(empty($errors2))
+							{ 
+								$gallery = $this->Products->ProductGalleries->newEntity();
+								$gallery = $this->Products->ProductGalleries->patchEntities($gallery,$datas);
+								
+								$this->Products->ProductGalleries->saveMany($gallery);
+							}else{
+								$this->Flash->error(implode('<br />', $errors1), ['escape' => false]);
+							}
+						}
+						$this->Products->ProductGalleries->deleteAll(['ProductGalleries.product_id'=>$product->id,'ProductGalleries.type'=>'description']);
+						if($product->product_galleries2)
+						{    
+							$datas=[]; $errors2=[];
+							foreach($product->product_galleries2 as $k => $product_gallery)
+							{ 
+							    $img_name3='';
+								if($product_gallery['product_image']['tmp_name'])
+								{
+									$fileName5 = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_FILENAME)); 
+									$fileName5 = $product->product_code.'_'.$fileName5;  
+									$fileExtension = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_EXTENSION));  
+									$img_name3 = static::FILE_PATH.$fileName5.'.'.$fileExtension;  
+									$file = new File(static::IMAGE_ROOT.$img_name3);
+									
+									$directory = $file->folder();
+									$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+									
+									$i = 1;
+									while($file->exists())
+									{
+										$img_name3 = static::FILE_PATH.$fileName5.' ('.$i++.').'.$fileExtension;
+										$file = new File(static::IMAGE_ROOT.$img_name3);
+									}
+									
+									$success = move_uploaded_file($product_gallery['product_image']['tmp_name'], static::IMAGE_ROOT.$img_name3);
+									/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$img_name3);
+									$newFile = static::IMAGE_ROOT.DS.$img_name3;
+									$w = 800;
+									$h = 800;
+									$img = "";
+									$ext = $fileExtension;
+									if($ext == "gif" || $ext == "GIF"){
+										$img = imagecreatefromgif(static::IMAGE_ROOT.$img_name3);
+									}else if($ext == "png" || $ext == "PNG"){
+										$img = imagecreatefrompng(static::IMAGE_ROOT.$img_name3);
+									}else{
+										$img = imagecreatefromjpeg(static::IMAGE_ROOT.$img_name3);
+									} 
+									$tci = imagecreatetruecolor($w, $h);
+									imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+									imagejpeg($tci, $newFile, 80); */
+									if(!$success)
+									{
+										$errors2[] = __('Unable to upload product photo. Please try again.');
+									} 
+								}else{
+									$img_name3=$product_gallery['h_product_image'];
+								}
+								$datas[] = [
+									'title' => $product_gallery['title'],
+									'product_image' => $img_name3,
+									'product_id' => $product->id,
+									'status' => $product_gallery['status'],
+									'is_deleted' => 0,
+									'type' => $product_gallery['type'],
+								];
+							} 
+							if(empty($errors2))
+							{ 
+								$gallery = $this->Products->ProductGalleries->newEntity();
+								$gallery = $this->Products->ProductGalleries->patchEntities($gallery,$datas);
+								
+								$this->Products->ProductGalleries->saveMany($gallery);
+							}else{
+								$this->Flash->error(implode('<br />', $errors1), ['escape' => false]);
+							}
+						}
+						if(count($related_product)>0)
+						{
+							if($related_product!='--select--'){
+							$this->Products->RelatedProducts->deleteAll(['product_id'=>$product->id]);
+							foreach($related_product as $related_product1)
+							{
+								$relatedProduct = $this->Products->RelatedProducts->newEntity();
+								$relatedProduct->product_id = $product->id;
+								$relatedProduct->rel_pro_id = $related_product1;
+								$relatedProduct->type = 'related';
+								$relatedProduct->is_deleted = 0;
+								$this->Products->RelatedProducts->save($relatedProduct);
+							}
+							}
+						}
+						
+						$this->Flash->success(__('The product has been updated successfully.'));
+						return $this->redirect(['action' => 'index']);
+					}
+					else{ 
+						$this->Flash->error(__('The product could not be updated.'));
+						//return $this->redirect(['action' => 'edit']);
+					}
+				}
+				else
+				{
+					$this->Flash->error(implode('<br />', $errors), ['escape' => false]);
+				}
+			}
+            else
+            {  
+                $this->Flash->error(__('The product could not be updated. Please see warning(s) below.'));
+				//return $this->redirect(['action' => 'index']);
+            }
+        }
+		$cate_id=[];$pro_id=[];
+        if(!empty($product->related_products))
+		{
+			foreach($product->related_products as $related_product)
+			{
+				$prod = $this->Products->find()
+				      ->where(['Products.id'=>$related_product->rel_pro_id,'Products.status'=>true,'Products.is_deleted'=>false])->first();
+				$cate_id[] = $prod->category_id;
+				$pro_id[] = $prod->id;
+			}
+		} 
+        $categories = $this->Products->Categories->find('treeList')
+            ->select(['id', 'name', 'parent_id', 'status'])
+            ->where(['Categories.is_deleted' => false,'Categories.status' => true])
+            ->andWhere(['Categories.level <' => static::CAT_MAXIMUM_LEVEL]);
+		$categoryList = $this->Products->Categories->find('treeList')
+            ->where(['Categories.is_deleted' => false,'Categories.status' => true])
+            ->andWhere(['Categories.level <' => static::CAT_MAXIMUM_LEVEL]);
+        $imageRoot = static::IMAGE_ROOT;
+		$labels = ['Material','Color','Type','Logo','MOQ','Samples Time','OEM','Packing Details','Production Capacity','Payment Term','Port of loading','Payment Flow','Delivery time','Paper','Leather','Size'];
+        $this->set(compact('product', 'categories','imageRoot','categoryArr','categoryList','cate_id','pro_id','labels'));
+        $this->set('activeMenu', 'Admin.Products.index');
+    }
+    public function copyProduct()
+    {   
+		$id           = $this->request->query('id');
+		$name         = $this->request->query('name');
+		$slug         = $this->request->query('slug');
+		$product_code = $this->request->query('product_code');
+		
+		if(!empty($id) && !empty($name) && !empty($slug) && !empty($product_code))
+		{
+        $this->set('page_title', __('Copy Product'));
+       
+        try
+        {
+            $product = $this->Products->get($id, [
+                'contain' => [
+                    'ProductCategories' => [
+                        'fields' => ['id', 'product_id', 'category_id']
+                    ],
+					'ProductGalleries'=> [
+                        'fields' => ['id', 'title', 'product_image','product_id','sequence','type']
+                    ],
+					'ProductSizes'=> [
+                        'fields' => ['id', 'product_id', 'size_detail','weight','sequence', 'pro_price', 'status','pro_qty','parameter']
+					],
+					'RelatedProducts'=>[
+					'fields' => ['id','product_id','rel_pro_id']
+					],
+					'ProductColors'=>[
+					'fields' => ['id','product_id','name','sequence','status']
+					],
+					'ProductLebelContents'=>[
+					'fields' => ['id','product_id','name','desceiption','sequence'],
+					'sort'=>['ProductLebelContents.sequence'=>'ASC']
+					]
+                ],
+                'conditions' => [
+                    'Products.is_deleted' => false,
+                ]
+            ]);
+           
+            $productDb = clone $product;
+			$categoryArr=[];
+			foreach($productDb->product_categories as $product_categorie)
+			{
+				
+				$categoryArr[] =$product_categorie->category_id;
+			}
+        }
+        catch(RecordNotFoundException $e)
+        {
+            $this->Flash->error(__('Invalid product selection.'));
+            return $this->redirect($this->_redirectUrl());
+        }
+        
+        if($this->request->is(['patch', 'post', 'put']))
+        {
+			$product = $this->Products->newEntity();
+			$related_product = $this->request->data('related_product');
+			$product_lebel_content = $this->request->data('product_lebel_contents');
+			$key_word ='';
+            $product2 = $this->request
+                ->withData('is_deleted', $productDb->is_deleted);
+            $keywords = $this->request->data('meta_keywords'); 
+            if(!empty($keywords))
+			{
+				foreach($keywords as $keyword)
+				{
+					$key_word .=$keyword.', ';
+				}
+				 
+			}
+			else{
+				$product->meta_keywords = ''; 
+			}  
+			if($product_lebel_content=='')
+			{
+				$this->Products->ProductLebelContents->deleteAll(['product_id'=>$product->id]);
+			}
+            $product = $this->Products->patchEntity($product, $product2->getData()); 
+			
+			$product->meta_keywords = rtrim($key_word,', ');
+			$product->image = @$productDb->image;
+			if(!empty($this->request->data('product_galleries'))){
+			$gallery_imgs = $this->request->data('product_galleries');	
+				foreach($gallery_imgs as $key => $gallery_img)
+				{  
+					if(empty($gallery_img['product_image']['tmp_name']))
+					{  
+						$product->product_galleries[@$key]->product_image = $gallery_img['h_product_image'];
+					}
+				}
+			} 
+			
+			if(!$product->errors())
+            { 
+				$errors = [];
+				if($this->request->getData('image.tmp_name'))
+				{
+					$fileName1 = strtolower(pathinfo($this->request->getData('image.name'), PATHINFO_FILENAME));  
+					$fileName = $product->product_code.'_'.$fileName1;  
+					$fileExtension = strtolower(pathinfo($this->request->getData('image.name'), PATHINFO_EXTENSION)); 
+					$product->image = static::FILE_PATH.$fileName.'.'.$fileExtension;
+					$file = new File(static::IMAGE_ROOT.$product->image);
+					
+					$directory = $file->folder();
+					$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+					
+					$i = 1;
+					while($file->exists())
+					{
+						$product->image = static::FILE_PATH.$fileName.' ('.$i++.').'.$fileExtension;
+						$file = new File(static::IMAGE_ROOT.$product->image);
+					}
+					
+					$success = move_uploaded_file($this->request->getData('image.tmp_name'), static::IMAGE_ROOT.$product->image);
+					/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$product->image);
+				    $newFile = static::IMAGE_ROOT.DS.$product->image;
+					$w = 800;
+					$h = 800;
+					$img = "";
+					$ext = $fileExtension;
+					if($ext == "gif" || $ext == "GIF"){
+						$img = imagecreatefromgif(static::IMAGE_ROOT.$product->image);
+					}else if($ext == "png" || $ext == "PNG"){
+						$img = imagecreatefrompng(static::IMAGE_ROOT.$product->image);
+					}else{
+						$img = imagecreatefromjpeg(static::IMAGE_ROOT.$product->image);
+					} 
+					$tci = imagecreatetruecolor($w, $h);
+					imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+					imagejpeg($tci, $newFile, 80); */
+					if(!$success)
+					{
+						$errors[] = __('Unable to upload product photo. Please try again.');
+					}
+				}
+				if(!empty($gallery_imgs))
+				{  
+					foreach($gallery_imgs as $key => $gallery_img)
+					{  
+						if($gallery_img['product_image']['tmp_name'])
+						{   
+							$fileName2 = strtolower(pathinfo($gallery_img['product_image']['name'], PATHINFO_FILENAME));
+							$fileName = $product->product_code.'_'.$fileName2;  							
+							$fileExtension = strtolower(pathinfo($gallery_img['product_image']['name'], PATHINFO_EXTENSION));  
+							$product->product_galleries[@$key]->product_image = static::FILE_PATH.$fileName.'.'.$fileExtension;  
+							$file = new File(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							
+							$directory = $file->folder();
+							$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+							
+							$i = 1;
+							while($file->exists())
+							{
+								$product->product_galleries[@$key]->product_image = static::FILE_PATH.$fileName.' ('.$i++.').'.$fileExtension;
+								$file = new File(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							}
+							
+							$success = move_uploaded_file($gallery_img['product_image']['tmp_name'], static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							
+							/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							$newFile = static::IMAGE_ROOT.DS.$product->product_galleries[@$key]->product_image;
+							$w = 800;
+							$h = 800;
+							$img = "";
+							$ext = $fileExtension;
+							if($ext == "gif" || $ext == "GIF"){
+								$img = imagecreatefromgif(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							}else if($ext == "png" || $ext == "PNG"){
+								$img = imagecreatefrompng(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							}else{
+								$img = imagecreatefromjpeg(static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							} 
+							$tci = imagecreatetruecolor($w, $h);
+							imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+							imagejpeg($tci, $newFile, 80); */
+							$square=800;
+
+							// Load up the original image
+							$src  = imagecreatefromjpeg($gallery_img['product_image']['tmp_name']);
+							$w = imagesx($src); // image width
+							$h = imagesy($src); // image height
+							//printf("Orig: %dx%d\n",$w,$h);
+
+							// Create output canvas and fill with white
+							$final = imagecreatetruecolor($square,$square);
+							$bg_color = imagecolorallocate ($final, 255, 255, 255);
+
+							imagefill($final, 0, 0, $bg_color);
+
+							// Check if portrait or landscape
+							if($h>=$w){
+							// Portrait, i.e. tall image
+							$newh=$square;
+							$neww=intval($square*$w/$h);
+							//printf("New: %dx%d\n",$neww,$newh);
+							// Resize and composite original image onto output canvas
+							imagecopyresampled(
+							$final, $src, 
+							intval(($square-$neww)/2),0,
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							} else {
+							// Landscape, i.e. wide image
+							$neww=$square;
+							$newh=intval($square*$h/$w);
+							//printf("New: %dx%d\n",$neww,$newh);
+							imagecopyresampled(
+							$final, $src, 
+							0,intval(($square-$newh)/2),
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							}
+
+							// Write result 
+							imagejpeg($final,static::IMAGE_ROOT.$product->product_galleries[@$key]->product_image);
+							if(!$success)
+							{
+								$errors[] = __('Unable to upload product photo. Please try again.');
+							} 
+						}
+						
+					}
+				}else{ 
+					$this->Products->ProductGalleries->deleteAll(['ProductGalleries.product_id'=>$product->id,'ProductGalleries.type'=>'other']);
+				}
+				
+				
+				if(empty($errors))
+				{   
+					if($product = $this->Products->save($product))
+					{    
+						if($product->images)
+						{    $data=[]; $errors1=[];
+							foreach($product->images as $key11 => $gallery_img)
+							{  
+							    $img_name='';
+								if($gallery_img['tmp_name'])
+								{   
+									$fileName3 = strtolower(pathinfo($gallery_img['name'], PATHINFO_FILENAME)); 
+									$fileName = $product->product_code.'_'.$fileName3;
+									$fileExtension = strtolower(pathinfo($gallery_img['name'], PATHINFO_EXTENSION));  
+									$img_name = static::FILE_PATH.$fileName.'.'.$fileExtension;  
+									$file = new File(static::IMAGE_ROOT.$img_name);
+									
+									$directory = $file->folder();
+									$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+									
+									$i = 1;
+									while($file->exists())
+									{
+										$img_name = static::FILE_PATH.$fileName.' ('.$i++.').'.$fileExtension;
+										$file = new File(static::IMAGE_ROOT.$img_name);
+									}
+									
+									$success = move_uploaded_file($gallery_img['tmp_name'], static::IMAGE_ROOT.$img_name);
+									$square=800;
+
+							// Load up the original image
+							$src  = imagecreatefromjpeg($gallery_img['tmp_name']);
+							$w = imagesx($src); // image width
+							$h = imagesy($src); // image height
+							//printf("Orig: %dx%d\n",$w,$h);
+
+							// Create output canvas and fill with white
+							$final = imagecreatetruecolor($square,$square);
+							$bg_color = imagecolorallocate ($final, 255, 255, 255);
+
+							imagefill($final, 0, 0, $bg_color);
+
+							// Check if portrait or landscape
+							if($h>=$w){
+							// Portrait, i.e. tall image
+							$newh=$square;
+							$neww=intval($square*$w/$h);
+							printf("New: %dx%d\n",$neww,$newh);
+							// Resize and composite original image onto output canvas
+							imagecopyresampled(
+							$final, $src, 
+							intval(($square-$neww)/2),0,
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							} else {
+							// Landscape, i.e. wide image
+							$neww=$square;
+							$newh=intval($square*$h/$w);
+							//printf("New: %dx%d\n",$neww,$newh);
+							imagecopyresampled(
+							$final, $src, 
+							0,intval(($square-$newh)/2),
+							0,0,
+							$neww, $newh, 
+							$w, $h);
+							}
+
+							// Write result 
+							imagejpeg($final,static::IMAGE_ROOT.$img_name);
+									/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$img_name);
+									$newFile = static::IMAGE_ROOT.DS.$img_name;
+									$w = 800;
+									$h = 800;
+									$img = "";
+									$ext = $fileExtension;
+									if($ext == "gif" || $ext == "GIF"){
+										$img = imagecreatefromgif(static::IMAGE_ROOT.$img_name);
+									}else if($ext == "png" || $ext == "PNG"){
+										$img = imagecreatefrompng(static::IMAGE_ROOT.$img_name);
+									}else{
+										$img = imagecreatefromjpeg(static::IMAGE_ROOT.$img_name);
+									} 
+									$tci = imagecreatetruecolor($w, $h);
+									imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+									imagejpeg($tci, $newFile, 80); */
+									if(!$success)
+									{
+										$errors1[] = __('Unable to upload product photo. Please try again.');
+									} 
+								}
+								$data[] = [
+									'title' => $product->image_name,
+									'product_image' => $img_name,
+									'product_id' => $product->id,
+									'status' => $product->image_status,
+									'is_deleted' => 0,
+									'type' => $product->image_types,
+								];
+							}
+							
+							if(empty($errors1))
+							{ 
+								$gallery = $this->Products->ProductGalleries->newEntity();
+								$gallery = $this->Products->ProductGalleries->patchEntities($gallery,$data);
+								
+								$this->Products->ProductGalleries->saveMany($gallery);
+							}else{
+								$this->Flash->error(implode('<br />', $errors1), ['escape' => false]);
+							}
+						}
+						$this->Products->ProductGalleries->deleteAll(['ProductGalleries.product_id'=>$product->id,'ProductGalleries.type'=>'related']);
+						if($product->product_galleries1)
+						{    
+							$datas=[]; $errors2=[];
+							foreach($product->product_galleries1 as $k => $product_gallery)
+							{ 
+							    $img_name2='';
+								if($product_gallery['product_image']['tmp_name'])
+								{
+									$fileName4 = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_FILENAME)); 
+									$fileName4 = $product->product_code.'_'.$fileName4;  
+									$fileExtension = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_EXTENSION));  
+									$img_name2 = static::FILE_PATH.$fileName4.'.'.$fileExtension;  
+									$file = new File(static::IMAGE_ROOT.$img_name2);
+									
+									$directory = $file->folder();
+									$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+									
+									$i = 1;
+									while($file->exists())
+									{
+										$img_name2 = static::FILE_PATH.$fileName4.' ('.$i++.').'.$fileExtension;
+										$file = new File(static::IMAGE_ROOT.$img_name2);
+									}
+									
+									$success = move_uploaded_file($product_gallery['product_image']['tmp_name'], static::IMAGE_ROOT.$img_name2);
+									/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$img_name2);
+									$newFile = static::IMAGE_ROOT.DS.$img_name2;
+									$w = 800;
+									$h = 800;
+									$img = "";
+									$ext = $fileExtension;
+									if($ext == "gif" || $ext == "GIF"){
+										$img = imagecreatefromgif(static::IMAGE_ROOT.$img_name2);
+									}else if($ext == "png" || $ext == "PNG"){
+										$img = imagecreatefrompng(static::IMAGE_ROOT.$img_name2);
+									}else{
+										$img = imagecreatefromjpeg(static::IMAGE_ROOT.$img_name2);
+									} 
+									$tci = imagecreatetruecolor($w, $h);
+									imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+									imagejpeg($tci, $newFile, 80); */
+									if(!$success)
+									{
+										$errors2[] = __('Unable to upload product photo. Please try again.');
+									} 
+								}else{
+									$img_name2=$product_gallery['h_product_image'];
+								}
+								$datas[] = [
+									'title' => $product_gallery['title'],
+									'product_image' => $img_name2,
+									'product_id' => $product->id,
+									'status' => $product_gallery['status'],
+									'is_deleted' => 0,
+									'type' => $product_gallery['type'],
+								];
+							} 
+							if(empty($errors2))
+							{ 
+								$gallery = $this->Products->ProductGalleries->newEntity();
+								$gallery = $this->Products->ProductGalleries->patchEntities($gallery,$datas);
+								
+								$this->Products->ProductGalleries->saveMany($gallery);
+							}else{
+								$this->Flash->error(implode('<br />', $errors1), ['escape' => false]);
+							}
+						}
+						$this->Products->ProductGalleries->deleteAll(['ProductGalleries.product_id'=>$product->id,'ProductGalleries.type'=>'description']);
+						if($product->product_galleries2)
+						{    
+							$datas=[]; $errors2=[];
+							foreach($product->product_galleries2 as $k => $product_gallery)
+							{ 
+							    $img_name3='';
+								if($product_gallery['product_image']['tmp_name'])
+								{
+									$fileName5 = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_FILENAME)); 
+									$fileName5 = $product->product_code.'_'.$fileName5;  
+									$fileExtension = strtolower(pathinfo($product_gallery['product_image']['name'], PATHINFO_EXTENSION));  
+									$img_name3 = static::FILE_PATH.$fileName5.'.'.$fileExtension;  
+									$file = new File(static::IMAGE_ROOT.$img_name3);
+									
+									$directory = $file->folder();
+									$directory->create(static::IMAGE_ROOT.static::FILE_PATH);
+									
+									$i = 1;
+									while($file->exists())
+									{
+										$img_name3 = static::FILE_PATH.$fileName5.' ('.$i++.').'.$fileExtension;
+										$file = new File(static::IMAGE_ROOT.$img_name3);
+									}
+									
+									$success = move_uploaded_file($product_gallery['product_image']['tmp_name'], static::IMAGE_ROOT.$img_name3);
+									/* list($w_orig, $h_orig) = getimagesize(static::IMAGE_ROOT.$img_name3);
+									$newFile = static::IMAGE_ROOT.DS.$img_name3;
+									$w = 800;
+									$h = 800;
+									$img = "";
+									$ext = $fileExtension;
+									if($ext == "gif" || $ext == "GIF"){
+										$img = imagecreatefromgif(static::IMAGE_ROOT.$img_name3);
+									}else if($ext == "png" || $ext == "PNG"){
+										$img = imagecreatefrompng(static::IMAGE_ROOT.$img_name3);
+									}else{
+										$img = imagecreatefromjpeg(static::IMAGE_ROOT.$img_name3);
+									} 
+									$tci = imagecreatetruecolor($w, $h);
+									imagecopyresampled($tci, $img, 0, 0, 0, 0, $w, $h, $w_orig, $h_orig);
+									imagejpeg($tci, $newFile, 80); */
+									if(!$success)
+									{
+										$errors2[] = __('Unable to upload product photo. Please try again.');
+									} 
+								}else{
+									$img_name3=$product_gallery['h_product_image'];
+								}
+								$datas[] = [
+									'title' => $product_gallery['title'],
+									'product_image' => $img_name3,
+									'product_id' => $product->id,
+									'status' => $product_gallery['status'],
+									'is_deleted' => 0,
+									'type' => $product_gallery['type'],
+								];
+							} 
+							if(empty($errors2))
+							{ 
+								$gallery = $this->Products->ProductGalleries->newEntity();
+								$gallery = $this->Products->ProductGalleries->patchEntities($gallery,$datas);
+								
+								$this->Products->ProductGalleries->saveMany($gallery);
+							}else{
+								$this->Flash->error(implode('<br />', $errors1), ['escape' => false]);
+							}
+						}
+						if(count($related_product)>0)
+						{
+							if($related_product!='--select--'){
+							$this->Products->RelatedProducts->deleteAll(['product_id'=>$product->id]);
+							foreach($related_product as $related_product1)
+							{
+								$relatedProduct = $this->Products->RelatedProducts->newEntity();
+								$relatedProduct->product_id = $product->id;
+								$relatedProduct->rel_pro_id = $related_product1;
+								$relatedProduct->type = 'related';
+								$relatedProduct->is_deleted = 0;
+								$this->Products->RelatedProducts->save($relatedProduct);
+							}
+							}
+						}
+						
+						$this->Flash->success(__('The product has been updated successfully.'));
+						return $this->redirect(['action' => 'index']);
+					}
+					else{ 
+						$this->Flash->error(__('The product could not be updated. Please see warning(s) below.'));
+					}
+				}
+				else
+				{
+					$this->Flash->error(implode('<br />', $errors), ['escape' => false]);
+				}
+			}
+            else
+            {  
+                $this->Flash->error(__('The product could not be updated. '));
+				//return $this->redirect(['action' => 'index']);
+            }
+        }
+		$cate_id=[];$pro_id=[];
+        if(!empty($product->related_products))
+		{
+			foreach($product->related_products as $related_product)
+			{
+				$prod = $this->Products->find()
+				      ->where(['Products.id'=>$related_product->rel_pro_id,'Products.status'=>true,'Products.is_deleted'=>false])->first();
+				$cate_id[] = $prod->category_id;
+				$pro_id[] = $prod->id;
+			}
+		} 
+        $categories = $this->Products->Categories->find('treeList')
+            ->select(['id', 'name', 'parent_id', 'status'])
+            ->where(['Categories.is_deleted' => false,'Categories.status' => true])
+            ->andWhere(['Categories.level <' => static::CAT_MAXIMUM_LEVEL]);
+		$categoryList = $this->Products->Categories->find('treeList')
+            ->where(['Categories.is_deleted' => false,'Categories.status' => true])
+            ->andWhere(['Categories.level <' => static::CAT_MAXIMUM_LEVEL]);
+        $imageRoot = static::IMAGE_ROOT;
+		$labels = ['Material','Color','Type','Logo','MOQ','Samples Time','OEM','Packing Details','Production Capacity','Payment Term','Port of loading','Payment Flow','Delivery time','Paper','Leather','Size'];
+        $this->set(compact('product', 'categories','imageRoot','categoryArr','categoryList','cate_id','pro_id','name','slug','product_code','labels'));
+		}
+		else{
+				$this->Flash->error(__('Try Again.'));
+				return $this->redirect(['action' => 'index']);
+		}
+        $this->set('activeMenu', 'Admin.Products.index');
+    }
+    public function delete($id = null)
+    {
+        try
+        {
+            $this->request->allowMethod(['post', 'delete']);
+        }
+        catch(MethodNotAllowedException $e)
+        {
+            $this->Flash->error(__('Requested action is not permitted.'));
+            return $this->redirect($this->_redirectUrl());
+        }
+        
+        try
+        {
+            $product = $this->Products->get($id, [
+                'contain' => [
+                    'Categories' => [
+                        'fields' => ['id', 'name']
+                    ]
+                ],
+                'conditions' => [
+                    'Products.is_deleted' => false,
+                    'Categories.is_deleted' => false
+                ]
+            ]);
+        }
+        catch(RecordNotFoundException $e)
+        {
+            $this->Flash->error(__('Invalid product selection.'));
+            return $this->redirect($this->_redirectUrl());
+        }
+        
+        
+        
+        $product->is_deleted = NULL;
+        if($this->Products->save($product))
+        {
+            $this->Flash->success(__('The product has been deleted successfully.'));
+        }
+        else
+        {
+            $this->Flash->error(__('The product could not be deleted. Please try again.'));
+        }
+        return $this->redirect($this->_redirectUrl());
+    }
+    
+    public function statusChange($state = 'inactive', $id = null)
+    {
+        try
+        {
+            $this->request->allowMethod(['post']);
+        }
+        catch(MethodNotAllowedException $e)
+        {
+            $this->Flash->error(__('Requested action is not permitted.'));
+            return $this->redirect($this->_redirectUrl());
+        }
+        
+        try
+        {
+            $product = $this->Products->get($id, [
+                'contain' => [
+                    'Categories' => [
+                        'fields' => ['id', 'name']
+                    ]
+                ],
+                'conditions' => [
+                    'Products.is_deleted' => false,
+                    'Categories.is_deleted' => false,
+                ]
+            ]);
+        }
+        catch(RecordNotFoundException $e)
+        {
+            $this->Flash->error(__('Invalid product selection.'));
+            return $this->redirect($this->_redirectUrl());
+        }
+        
+        if($state == 'active')
+        {
+            $status = 'active';
+            $product2 = $this->request->withData('status', 1);
+        }
+        else
+        {
+            $status = 'inactive';
+            $product2 = $this->request->withData('status', 0);
+        }
+        
+        $product = $this->Products->patchEntity($product, $product2->getData());
+        if($this->Products->save($product))
+        {
+            $this->Flash->success(__('The product has been {0} successfully.', $status));
+        }
+        else
+        {
+            $this->Flash->error(__('The product could not be {0}. Please try again.', $status));
+        }
+        return $this->redirect($this->_redirectUrl());
+    }
+    
+    public function getProducts($id = null)
+	{
+		try
+        {
+            if(!$this->request->is('ajax'))
+            {
+                throw new BadRequestException();
+            }
+        }
+        catch(BadRequestException $e)
+        {
+            $this->Flash->error(__('Only ajax request can be processed.'));
+            return $this->redirect($this->_redirectUrl());
+        }
+		$products = $this->Products->find('list')
+		            ->where(['Products.category_id IN'=>$this->request->getData('categort_id'),'Products.status'=>true,'Products.is_deleted'=>false]);
+		$pro_id = $this->request->getData('pro_id');
+		$this->set(compact('products','pro_id'));
+	}
+    public function view($id = null)
+    {
+        $id = $this->request->getQuery('id');
+        $this->set('page_title', __('View Product'));
+        try
+        {
+            $product = $this->Products->get($id, [
+                'contain' => [
+                    'Categories' => ['fields' => ['id', 'name']]]
+            ]);
+            
+            $productDb = clone $product;
+        }
+        catch(RecordNotFoundException $e)
+        {
+            $this->Flash->error(__('Invalid file selection.'));
+            return $this->redirect($this->_redirectUrl());
+        }
+        
+        $imageRoot = static::IMAGE_ROOT;
+        $this->set(compact('product','imageRoot'));
+        $this->set('activeMenu', 'Admin.Products.index');
+    }
+}
